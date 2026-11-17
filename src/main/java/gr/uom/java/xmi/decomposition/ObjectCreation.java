@@ -44,11 +44,13 @@ import org.jetbrains.kotlin.psi.ValueArgument;
 
 import com.caoccao.javet.swc4j.ast.clazz.Swc4jAstComputedPropName;
 import com.caoccao.javet.swc4j.ast.clazz.Swc4jAstPrivateName;
+import com.caoccao.javet.swc4j.ast.expr.Swc4jAstCondExpr;
 import com.caoccao.javet.swc4j.ast.expr.Swc4jAstExprOrSpread;
 import com.caoccao.javet.swc4j.ast.expr.Swc4jAstIdent;
 import com.caoccao.javet.swc4j.ast.expr.Swc4jAstIdentName;
 import com.caoccao.javet.swc4j.ast.expr.Swc4jAstMemberExpr;
 import com.caoccao.javet.swc4j.ast.expr.Swc4jAstNewExpr;
+import com.caoccao.javet.swc4j.ast.expr.Swc4jAstParenExpr;
 import com.caoccao.javet.swc4j.ast.expr.Swc4jAstTsNonNullExpr;
 import com.caoccao.javet.swc4j.ast.interfaces.ISwc4jAstCallee;
 import com.caoccao.javet.swc4j.ast.interfaces.ISwc4jAstExpr;
@@ -439,6 +441,9 @@ public class ObjectCreation extends AbstractCall {
 	public ObjectCreation(String sourceFolder, String filePath, Swc4jAstNewExpr invocation, VariableDeclarationContainer container, String fileContent) {
 		super(sourceFolder, filePath, invocation, CodeElementType.CLASS_INSTANCE_CREATION, container, fileContent);
 		ISwc4jAstCallee callee = invocation.getCallee();
+		while(callee instanceof Swc4jAstParenExpr parenExpr) {
+			callee = parenExpr.getExpr();
+		}
 		if(callee instanceof Swc4jAstMemberExpr memberExpr) {
 			ISwc4jAstMemberProp prop = memberExpr.getProp();
 			if(prop instanceof Swc4jAstPrivateName privateName)
@@ -469,6 +474,9 @@ public class ObjectCreation extends AbstractCall {
 			else if(expr instanceof Swc4jAstIdent ident) {
 				this.type = UMLType.extractTypeObject(sourceFolder, filePath, fileContent, ident, 0);
 			}
+		}
+		else if(callee instanceof Swc4jAstCondExpr condExpr) {
+			this.type = UMLType.extractTypeObject(TypeScriptVisitor.text(fileContent, condExpr), LANG);
 		}
 		this.arguments = new ArrayList<String>();
 		Optional<List<Swc4jAstExprOrSpread>> args = invocation.getArgs();
