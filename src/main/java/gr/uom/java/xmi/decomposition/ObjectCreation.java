@@ -466,6 +466,9 @@ public class ObjectCreation extends AbstractCall {
 				ISwc4jAstExpr receiver = memberExpr.getObj();
 				this.expression = TypeScriptVisitor.text(fileContent, receiver);
 			}
+			else if(expr instanceof Swc4jAstIdent ident) {
+				this.type = UMLType.extractTypeObject(sourceFolder, filePath, fileContent, ident, 0);
+			}
 		}
 		this.arguments = new ArrayList<String>();
 		Optional<List<Swc4jAstExprOrSpread>> args = invocation.getArgs();
