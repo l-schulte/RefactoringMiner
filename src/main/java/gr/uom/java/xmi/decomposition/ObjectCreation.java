@@ -103,7 +103,7 @@ public class ObjectCreation extends AbstractCall {
 		this.arguments = new ArrayList<String>();
 		List<Type> typeArgs = creation.typeArguments();
 		for(Type typeArg : typeArgs) {
-			this.typeArguments.add(UMLType.extractTypeObject(cu, sourceFolder, filePath, typeArg, 0, javaFileContent));
+			addTypeArgument(UMLType.extractTypeObject(cu, sourceFolder, filePath, typeArg, 0, javaFileContent));
 		}
 		List<Expression> args = creation.arguments();
 		for(Expression argument : args) {
@@ -378,7 +378,7 @@ public class ObjectCreation extends AbstractCall {
 		this.arguments = new ArrayList<String>();
 		List<KtTypeProjection> typeArgs = invocation.getTypeArguments();
 		for(KtTypeProjection typeArg : typeArgs) {
-			this.typeArguments.add(UMLType.extractTypeObject(cu, sourceFolder, filePath, fileContent, typeArg, 0));
+			addTypeArgument(UMLType.extractTypeObject(cu, sourceFolder, filePath, fileContent, typeArg, 0));
 		}
 		List<KtValueArgument> args = invocation.getValueArguments();
 		for(KtValueArgument argument : args) {
@@ -423,7 +423,7 @@ public class ObjectCreation extends AbstractCall {
 		this.arguments = new ArrayList<String>();
 		List<KtTypeProjection> typeArgs = invocation.getTypeArguments();
 		for(KtTypeProjection typeArg : typeArgs) {
-			this.typeArguments.add(UMLType.extractTypeObject(cu, sourceFolder, filePath, fileContent, typeArg, 0));
+			addTypeArgument(UMLType.extractTypeObject(cu, sourceFolder, filePath, fileContent, typeArg, 0));
 		}
 		List<? extends ValueArgument> args = invocation.getValueArguments();
 		for(ValueArgument argument : args) {
@@ -497,7 +497,7 @@ public class ObjectCreation extends AbstractCall {
 			List<ISwc4jAstTsType> typeArguments = typeArgs.get().getParams();
 			for(ISwc4jAstTsType typeArgument : typeArguments) {
 				UMLType type = UMLType.extractTypeObject(sourceFolder, filePath, fileContent, typeArgument, 0);
-				this.typeArguments.add(type);
+				addTypeArgument(type);
 			}
 		}
 	}

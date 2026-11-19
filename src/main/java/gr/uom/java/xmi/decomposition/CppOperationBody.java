@@ -98,7 +98,7 @@ public class CppOperationBody extends OperationBody {
 				break;
 			}
 		}
-		//this.activeVariableDeclarations = null;
+		//kept for the catch handlers, trailing return type and constructor initializers, see releaseActiveVariableDeclarations()
 	}
 
 	public CppOperationBody(String sourceFolder, String filePath, IASTCompoundStatement methodBody, VariableDeclarationContainer container, Map<String,Set<VariableDeclaration>> activeVariableDeclarations, String fileContent) {
@@ -128,6 +128,11 @@ public class CppOperationBody extends OperationBody {
 				break;
 			}
 		}
+		this.activeVariableDeclarations = null;
+	}
+
+	public void releaseActiveVariableDeclarations() {
+		this.activeVariableDeclarations = null;
 	}
 
 	public List<IASTSimpleDeclaration> getNestedSimpleDeclarations() {
@@ -265,7 +270,8 @@ public class CppOperationBody extends OperationBody {
 			removeAllFromActiveVariableDeclarations(variableDeclarations);
 		}
 		else if(statement instanceof IASTLabelStatement labelStatement) {
-			CompositeStatementObject child = new CompositeStatementObject(sourceFolder, filePath, labelStatement, parent.getDepth()+1, CodeElementType.LABELED_STATEMENT.setName(labelStatement.getName().toString()), fileContent);
+			CompositeStatementObject child = new CompositeStatementObject(sourceFolder, filePath, labelStatement, parent.getDepth()+1, CodeElementType.LABELED_STATEMENT, fileContent);
+			child.setLabel(labelStatement.getName().toString());
 			parent.addStatement(child);
 			addStatementInVariableScopes(child);
 			if(labelStatement.getNestedStatement() != null) {
@@ -280,6 +286,16 @@ public class CppOperationBody extends OperationBody {
 		else if(statement instanceof IASTProblemStatement problemStatement) {
 			//CDT splits a statement into problems at an argument it cannot parse, i.e., ASSIGN_OR_RETURN(auto x, f({{a, b}}, c));
 			List<AbstractStatement> siblings = parent.getStatements();
+			//a problem at code of the previous statement, which CDT reports again, i.e., the ) of for_each_possible_cpu(cpu) followed by the statement it repeats,
+			//which CDT parses as a declaration without its semicolon, like the tree that has no node for it
+			if(!siblings.isEmpty() && problemStatement.getFileLocation() != null) {
+				LocationInfo previous = siblings.get(siblings.size() - 1).getLocationInfo();
+				int start = problemStatement.getFileLocation().getNodeOffset();
+				int end = start + problemStatement.getFileLocation().getNodeLength();
+				if(start >= previous.getStartOffset() && end <= previous.getEndOffset()) {
+					return;
+				}
+			}
 			if(!siblings.isEmpty() && siblings.get(siblings.size() - 1) instanceof StatementObject previous &&
 					previous.getLocationInfo().getCodeElementType().equals(CodeElementType.PROBLEM_STATEMENT) &&
 					CppVisitor.unbalancedParentheses(fileContent.substring(previous.getLocationInfo().getStartOffset(), previous.getLocationInfo().getEndOffset()))) {

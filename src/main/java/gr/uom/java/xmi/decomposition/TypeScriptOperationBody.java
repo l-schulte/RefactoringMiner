@@ -339,7 +339,8 @@ public class TypeScriptOperationBody extends OperationBody {
 		}
 		else if(statement instanceof Swc4jAstLabeledStmt labeledStatement) {
 			Swc4jAstIdent label = labeledStatement.getLabel();
-			CompositeStatementObject child = new CompositeStatementObject(sourceFolder, filePath, labeledStatement, parent.getDepth()+1, CodeElementType.LABELED_STATEMENT.setName(label.getSym()), fileContent);
+			CompositeStatementObject child = new CompositeStatementObject(sourceFolder, filePath, labeledStatement, parent.getDepth()+1, CodeElementType.LABELED_STATEMENT, fileContent);
+			child.setLabel(label.getSym());
 			parent.addStatement(child);
 			addStatementInVariableScopes(child);
 			processStatement(sourceFolder, filePath, child, labeledStatement.getBody(), fileContent);
@@ -738,7 +739,7 @@ public class TypeScriptOperationBody extends OperationBody {
 						List<ISwc4jAstTsType> typeParams = instantiation.getParams();
 						for(ISwc4jAstTsType typeParam : typeParams) {
 							UMLType umlTypeParam = UMLType.extractTypeObject(sourceFolder, filePath, fileContent, typeParam, 0);
-							type.getTypeArguments().add(umlTypeParam);
+							type.addTypeArgument(umlTypeParam);
 						}
 					}
 					umlClass.addImplementedInterface(type);

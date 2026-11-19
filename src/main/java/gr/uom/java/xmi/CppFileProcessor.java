@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntUnaryOperator;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -162,6 +163,10 @@ public class CppFileProcessor {
 	private CppPreprocessor preprocessor;
 	//the start offsets of the macros expanded to nothing in the file by their end offsets, i.e., DUCKDB_API in DUCKDB_API virtual ~A() = default;
 	private TreeMap<Integer, IASTPreprocessorMacroExpansion> emptyMacroExpansions = new TreeMap<>();
+	private IntUnaryOperator braceMatcher;
+	//the function definitions parsed again with the code of the preprocessor branches that are not taken, by their start offsets in the translation unit of the file
+	private Map<Integer, IASTFunctionDefinition> conditionalBodies = Map.of();
+	private IASTTranslationUnit conditionalBodySource;
 
 	public CppFileProcessor(UMLModel umlModel) {
 		this.umlModel = umlModel;
@@ -173,13 +178,16 @@ public class CppFileProcessor {
 		this.preprocessor = new CppPreprocessor(this);
 		try {
 			if(PathFileUtils.isCppFile(filePath) || PathFileUtils.isCFile(filePath)) {
-				IASTTranslationUnit treeAst = parse(filePath, fileContent, astDiff);
+				ParsedFile parsed = parseWithPreamble(filePath, fileContent, astDiff);
+				IASTTranslationUnit treeAst = parsed.translationUnit();
 				if (astDiff) {
 					//a single parse for the model and the AST diff tree, unless the model needs the declarations wrapped in macro calls
 					TreeContext treeContext = CppTreeGenerator.generate(fileContent, treeAst);
 					this.umlModel.getTreeContextMap().put(filePath, treeContext);
 				}
 				IASTTranslationUnit ast = withoutDeclarationMacros(treeAst, filePath, fileContent, astDiff);
+				this.conditionalBodySource = ast;
+				this.conditionalBodies = CppConditionalBodies.parse(ast, filePath, fileContent, astDiff, parsed.preamble());
 				this.emptyMacroExpansions = emptyMacroExpansions(ast);
 				String sourceFolder = extractCppSourceFolder();
 				List<UMLComment> comments = extractInternalComments(ast.getComments(), sourceFolder, filePath, fileContent);
@@ -385,6 +393,8 @@ public class CppFileProcessor {
 
 	private void processPreprocessorStatements(String sourceFolder, UMLClass moduleClass, IASTPreprocessorStatement[] allPreprocessorStatements) {
 		Map<IASTPreprocessorStatement, Integer> conditionalBlockEnds = conditionalBlockEnds(allPreprocessorStatements);
+		//the opening directives of the conditional groups that are still open, the innermost first
+		Deque<UMLPreprocessorStatement> openGroups = new ArrayDeque<>();
 		for(IASTPreprocessorStatement statement : allPreprocessorStatements) {
 			if(!isPartOfFile(statement)) {
 				continue;
@@ -416,30 +426,36 @@ public class CppFileProcessor {
 				//convert char[] to string
 				value = new String(ifStatement.getCondition());
 				preprocessorStatement = new UMLPreprocessorStatement(locationInfo,Directive.IF,value);
+				openGroups.push(preprocessorStatement);
 			}
 			else if(statement instanceof IASTPreprocessorIfdefStatement ifdefStatement) {
 				//convert char[] to string
 				value = new String(ifdefStatement.getCondition());
 				preprocessorStatement = new UMLPreprocessorStatement(locationInfo,Directive.IFDEF,value);
+				openGroups.push(preprocessorStatement);
 			}
 			else if(statement instanceof IASTPreprocessorIfndefStatement ifndefStatement) {
 				//convert char[] to string
 				value = new String(ifndefStatement.getCondition());
 				preprocessorStatement = new UMLPreprocessorStatement(locationInfo,Directive.IFNDEF,value);
+				openGroups.push(preprocessorStatement);
 			}
 			else if(statement instanceof IASTPreprocessorElifStatement elifStatement) {
 				//convert char[] to string
 				value = new String(elifStatement.getCondition());
 				preprocessorStatement = new UMLPreprocessorStatement(locationInfo,Directive.ELIF,value);
-				attachRootIf(preprocessorStatement, moduleClass);
+				if(!openGroups.isEmpty())
+					preprocessorStatement.setPreviousStatement(openGroups.peek());
 			}
 			else if(statement instanceof IASTPreprocessorElseStatement elseStatement) {
 				preprocessorStatement = new UMLPreprocessorStatement(locationInfo,Directive.ELSE);
-				attachRootIf(preprocessorStatement, moduleClass);
+				if(!openGroups.isEmpty())
+					preprocessorStatement.setPreviousStatement(openGroups.peek());
 			}
 			else if(statement instanceof IASTPreprocessorEndifStatement endifStatement) {
 				preprocessorStatement = new UMLPreprocessorStatement(locationInfo,Directive.ENDIF);
-				attachRootIf(preprocessorStatement, moduleClass);
+				if(!openGroups.isEmpty())
+					preprocessorStatement.setPreviousStatement(openGroups.pop());
 			}
 			else if(statement instanceof IASTPreprocessorPragmaStatement pragmaStatement) {
 				//convert char[] to string
@@ -572,6 +588,7 @@ public class CppFileProcessor {
 	//so that they are compared with the directives of the same class only
 	private static void distributePreprocessorStatements(UMLClass moduleClass, List<UMLClass> classesOfFile) {
 		for(UMLPreprocessorStatement statement : new ArrayList<>(moduleClass.getPreprocessorStatements())) {
+			setEnclosingFunction(statement, moduleClass, classesOfFile);
 			UMLClass innermost = null;
 			for(UMLClass umlClass : classesOfFile) {
 				if(umlClass != moduleClass && umlClass.getLocationInfo().subsumes(statement.getLocationInfo()) &&
@@ -587,13 +604,14 @@ public class CppFileProcessor {
 		}
 	}
 
-	private void attachRootIf(UMLPreprocessorStatement preprocessorStatement, UMLClass moduleClass) {
-		if(moduleClass.getPreprocessorStatements().size() > 0) {
-			for(int i = moduleClass.getPreprocessorStatements().size()-1; i>0; i--) {
-				UMLPreprocessorStatement statement = moduleClass.getPreprocessorStatements().get(i);
-				if(statement.getType().equals(Directive.IF) || statement.getType().equals(Directive.IFDEF) || statement.getType().equals(Directive.IFNDEF)) {
-					preprocessorStatement.setPreviousStatement(statement);
-					break;
+	private static void setEnclosingFunction(UMLPreprocessorStatement statement, UMLClass moduleClass, List<UMLClass> classesOfFile) {
+		List<UMLClass> classes = new ArrayList<>(classesOfFile);
+		classes.add(moduleClass);
+		for(UMLClass umlClass : classes) {
+			for(UMLOperation operation : umlClass.getOperations()) {
+				if(operation.getLocationInfo().subsumes(statement.getLocationInfo())) {
+					statement.setEnclosingFunction(operation.getName());
+					return;
 				}
 			}
 		}
@@ -676,6 +694,13 @@ public class CppFileProcessor {
 	}
 
 	public static IASTTranslationUnit parse(String filePath, String fileContent, boolean astDiff) throws CoreException {
+		return parseWithPreamble(filePath, fileContent, astDiff).translationUnit();
+	}
+
+	//the translation unit and the declarations included before the file, which are reused when parts of the file are parsed again
+	record ParsedFile(IASTTranslationUnit translationUnit, String preamble) {}
+
+	static ParsedFile parseWithPreamble(String filePath, String fileContent, boolean astDiff) throws CoreException {
 		IASTTranslationUnit translationUnit = parse(filePath, fileContent, astDiff, "");
 		//CDT parses the declarations starting with the macros defined in the headers it does not have, i.e., DUCKDB_API virtual void f();,
 		//as problems or as declarations of variables whose type is the macro, so the file is parsed again with these macros defined as empty
@@ -729,12 +754,14 @@ public class CppFileProcessor {
 		//i.e., f(a)(b); as the declaration of a with type f, so the file is parsed again with these names declared as functions in the included file
 		String functions = misparsedCalls(translationUnit, fileContent);
 		if(!functions.isEmpty()) {
-			IASTTranslationUnit reparsed = parse(filePath, fileContent, astDiff, preamble.isEmpty() ? functions : preamble + "\n" + functions);
+			String extendedPreamble = preamble.isEmpty() ? functions : preamble + "\n" + functions;
+			IASTTranslationUnit reparsed = parse(filePath, fileContent, astDiff, extendedPreamble);
 			if(problems(reparsed) <= problems(translationUnit)) {
 				translationUnit = reparsed;
+				preamble = extendedPreamble;
 			}
 		}
-		return translationUnit;
+		return new ParsedFile(translationUnit, preamble);
 	}
 
 	//the start of a declaration of a variable whose type is a class template, i.e., ns::T<A> x = e;
@@ -895,6 +922,7 @@ public class CppFileProcessor {
 	private static final String GOOGLE_TEST_STUB = stub("/cpp-stubs/gtest.h");
 	private static final String ABSEIL_STUB = stub("/cpp-stubs/absl.h");
 	private static final String PROTOCOL_BUFFERS_STUB = stub("/cpp-stubs/protobuf.h");
+	private static final String LINUX_KERNEL_STUB = stub("/cpp-stubs/linux.h");
 
 	//the stub without the lines of its documentation, since CDT gives the comments of the included files with their offsets in these files
 	private static String stub(String resource) {
@@ -920,6 +948,10 @@ public class CppFileProcessor {
 		//the code generated by protoc and the code using the Protocol Buffers library
 		if(fileContent.contains("google/protobuf/") || fileContent.contains("GOOGLE_PROTOBUF") || fileContent.contains("PROTOBUF_")) {
 			stubs.append("\n").append(PROTOCOL_BUFFERS_STUB);
+		}
+		//the code of the Linux kernel, which includes its own headers
+		if(fileContent.contains("#include <linux/") || fileContent.contains("#include <asm/")) {
+			stubs.append("\n").append(LINUX_KERNEL_STUB);
 		}
 		return stubs.toString();
 	}
@@ -1092,7 +1124,7 @@ public class CppFileProcessor {
 		return last == ';' || last == '}';
 	}
 
-	private static IASTTranslationUnit parse(String filePath, String fileContent, boolean astDiff, String templates) throws CoreException {
+	static IASTTranslationUnit parse(String filePath, String fileContent, boolean astDiff, String templates) throws CoreException {
 		FileContent content = FileContent.create(filePath, fileContent.toCharArray());
 		Map<String, String> predefinedMacros = new HashMap<>();
 		String[] includeFiles = templates.isEmpty() ? new String[] {STUBS_FILE} : new String[] {STUBS_FILE, TEMPLATES_FILE};
@@ -1531,6 +1563,7 @@ public class CppFileProcessor {
 			//When the CDT parser encounters unrecognized code, it captures the issue inside this declaration so parsing can continue.
 			LocationInfo location = new LocationInfo(sourceFolder, filePath, cppProblemDeclaration, CodeElementType.PROBLEM_DECLARATION, fileContent);
 			String raw = cppProblemDeclaration.getRawSignature();
+			int truncatedDeclarationEnd = truncatedProblemDeclarationEnd(cppProblemDeclaration);
 			//the problem ends with its code, without the line break that CDT includes, i.e., TEST(A, B) {\n in an inactive branch
 			if(raw.length() > raw.stripTrailing().length() && location.getEndOffset() - location.getStartOffset() == raw.length()) {
 				int end = location.getStartOffset() + raw.stripTrailing().length();
@@ -1554,6 +1587,10 @@ public class CppFileProcessor {
 					close = fileContent.lastIndexOf('}', close);
 					location = new LocationInfo(sourceFolder, filePath, location.getStartOffset(), close + 1 - location.getStartOffset(), close + 1, CodeElementType.PROBLEM_DECLARATION, fileContent);
 				}
+			}
+			if(truncatedDeclarationEnd > 0) {
+				//the declaration ends where the tree ends it, and the separate declarations of the rest of its code are skipped
+				location = new LocationInfo(sourceFolder, filePath, location.getStartOffset(), truncatedDeclarationEnd - location.getStartOffset(), truncatedDeclarationEnd, CodeElementType.PROBLEM_DECLARATION, fileContent);
 			}
 			UMLProblemDeclaration problemDeclaration = new UMLProblemDeclaration(packageName, sourceFolder, location, signature, raw, isFunctionDefinition, isFunctionDeclarator, isClassDeclaration);
 			distributeComments(comments, location, problemDeclaration.getComments());
@@ -1644,6 +1681,44 @@ public class CppFileProcessor {
 			}
 		}
 		return currentVisibility;
+	}
+
+	//the end of a declaration that CDT parsed as a problem ending inside its braces, while the rest follows as separate declarations; -1 for other declarations;
+	//a function definition ends with its body, i.e., SYSCALL_DEFINE0(fork) { #ifdef CONFIG_MMU ... #endif }, like the function_definition of the tree,
+	//and a declaration with an initializer ends with its semicolon, i.e., static const struct ctl_table t[] = { {...}, #ifdef X {...}, #endif };, like the declaration of the tree
+	int truncatedProblemDeclarationEnd(IASTDeclaration declaration) {
+		IASTFileLocation location = declaration.getFileLocation();
+		if(!(declaration instanceof IASTProblemDeclaration) || location == null || !isPartOfFile(declaration)) {
+			return -1;
+		}
+		int start = location.getNodeOffset();
+		int end = start + location.getNodeLength();
+		if(end > fileContent.length()) {
+			return -1;
+		}
+		String code = fileContent.substring(start, end).stripTrailing();
+		int brace = code.indexOf('{');
+		if(brace < 0) {
+			return -1;
+		}
+		if(braceMatcher == null) {
+			braceMatcher = CppTreeGenerator.braceMatcher(fileContent);
+		}
+		int close = braceMatcher.applyAsInt(start + brace);
+		//the closing brace in the branch of the opening one, and not after an alternative opening in a sibling branch, i.e., #if X TEST(A, B) { #else TEST(A, C) { #endif ... }
+		if(close + 1 > start + code.length() && close < fileContent.length() && fileContent.charAt(close) == '}' && preprocessor.inSameConditionalBranches(start + brace, close)) {
+			if(code.substring(0, brace).stripTrailing().endsWith("=")) {
+				int semicolon = close + 1;
+				while(semicolon < fileContent.length() && Character.isWhitespace(fileContent.charAt(semicolon))) {
+					semicolon++;
+				}
+				if(semicolon < fileContent.length() && fileContent.charAt(semicolon) == ';') {
+					return semicolon + 1;
+				}
+			}
+			return close + 1;
+		}
+		return -1;
 	}
 
 	boolean shouldProcessDeclaration(IASTDeclaration declaration) {
@@ -1759,6 +1834,12 @@ public class CppFileProcessor {
 			this.umlModel.addClass(umlClass);
 			distributeComments(comments, locationInfo, umlClass.getComments());
 		}
+		else if(declSpecifier instanceof ICPPASTElaboratedTypeSpecifier elaboratedTypeSpecifier && !elaboratedTypeSpecifier.isFriend() && declaresVariables(simpleDeclaration)) {
+			//the variables of an elaborated type, i.e., static struct kmem_cache *cachep; or static const struct ctl_table table[] = {...};, like the variables of other types
+			for(IASTDeclarator declarator : simpleDeclaration.getDeclarators()) {
+				processAttribute(packageName, sourceFolder, parentContainer, currentVisibility, comments, declSpecifier, declarator, templateParameters);
+			}
+		}
 		else if(declSpecifier instanceof ICPPASTElaboratedTypeSpecifier elaboratedTypeSpecifier) {
 			//forward declaration: class, struct, union, enum
 			// struct SReadableWaiter;
@@ -1856,6 +1937,20 @@ public class CppFileProcessor {
 				}
 			}
 		}
+	}
+
+	//whether the declarators of the declaration are named variables, and not functions
+	private static boolean declaresVariables(IASTSimpleDeclaration simpleDeclaration) {
+		IASTDeclarator[] declarators = simpleDeclaration.getDeclarators();
+		if(declarators.length == 0) {
+			return false;
+		}
+		for(IASTDeclarator declarator : declarators) {
+			if(declarator instanceof IASTFunctionDeclarator || declarator.getName() == null || declarator.getName().toString().isBlank()) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private void processAttribute(String packageName, String sourceFolder, UMLAbstractClass parentContainer,
@@ -2028,11 +2123,16 @@ public class CppFileProcessor {
 
 		String actualSignature = functionDefinition.getRawSignature().contains("{") ? functionDefinition.getRawSignature().substring(0, functionDefinition.getRawSignature().indexOf("{") + 1) : functionDefinition.getRawSignature();
 		operation.setActualSignature(actualSignature);
-		IASTStatement body = functionDefinition.getBody();
+		//the body with the statements of the branches that are not taken, i.e., of a function definition in #ifdef CONFIG_X without CONFIG_X
+		IASTFunctionDefinition bodyDefinition = functionDefinition;
+		if(functionDefinition.getTranslationUnit() == conditionalBodySource && functionDefinition.getFileLocation() != null) {
+			bodyDefinition = conditionalBodies.getOrDefault(functionDefinition.getFileLocation().getNodeOffset(), functionDefinition);
+		}
+		IASTStatement body = bodyDefinition.getBody();
 		if(body instanceof IASTCompoundStatement compoundStatement) {
 			CppOperationBody operationBody = new CppOperationBody(sourceFolder, filePath, compoundStatement, operation, parentContainer.getAttributes(), fileContent);
 			operation.setBody(operationBody);
-			if(functionDefinition instanceof ICPPASTFunctionWithTryBlock withTryBlock) {
+			if(bodyDefinition instanceof ICPPASTFunctionWithTryBlock withTryBlock) {
 				ICPPASTCatchHandler[] catchHandlers = withTryBlock.getCatchHandlers();
 				for(ICPPASTCatchHandler catchHandler : catchHandlers) {
 					operationBody.addCatchHandlerToFunction(sourceFolder, filePath, catchHandler, fileContent);
@@ -2093,6 +2193,10 @@ public class CppFileProcessor {
 					}
 				}
 			}
+		}
+		if(operation.getBody() instanceof CppOperationBody operationBody) {
+			//the variables in scope are needed only while building the body, the trailing return type and the constructor initializers
+			operationBody.releaseActiveVariableDeclarations();
 		}
 		return operation;
 	}
